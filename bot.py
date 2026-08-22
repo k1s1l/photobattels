@@ -16,11 +16,16 @@ from aiogram.client.default import DefaultBotProperties
 from config import BOT_TOKEN, ADMIN_ID
 
 
-# =========================
+# ==========================================
 # НАСТРОЙКИ
-# =========================
+# ==========================================
 
 COOLDOWN = timedelta(hours=14)
+
+
+# ==========================================
+# BOT
+# ==========================================
 
 bot = Bot(
     token=BOT_TOKEN,
@@ -32,49 +37,99 @@ bot = Bot(
 dp = Dispatcher()
 
 
-# =========================
+# ==========================================
 # DATABASE
-# =========================
+# ==========================================
 
-db = sqlite3.connect("battle.db", check_same_thread=False)
+db = sqlite3.connect(
+    "battle.db",
+    check_same_thread=False
+)
+
 cursor = db.cursor()
+
 
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS users (
     user_id INTEGER PRIMARY KEY,
     username TEXT,
+    first_seen INTEGER,
+    last_seen INTEGER,
     last_photo INTEGER
+)
+""")
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS photos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    created_at INTEGER
 )
 """)
 
 db.commit()
 
 
-# =========================
+# ==========================================
 # СОХРАНЕНИЕ ПОЛЬЗОВАТЕЛЯ
-# =========================
+# ==========================================
 
 def save_user(message: Message):
 
     user_id = message.from_user.id
     username = message.from_user.username
+    now = int(datetime.now().timestamp())
 
     cursor.execute(
-        """
-        INSERT INTO users (user_id, username, last_photo)
-        VALUES (?, ?, NULL)
-        ON CONFLICT(user_id)
-        DO UPDATE SET username = excluded.username
-        """,
-        (user_id, username)
+        "SELECT user_id FROM users WHERE user_id = ?",
+        (user_id,)
     )
+
+    exists = cursor.fetchone()
+
+    if exists:
+
+        cursor.execute(
+            """
+            UPDATE users
+            SET username = ?, last_seen = ?
+            WHERE user_id = ?
+            """,
+            (
+                username,
+                now,
+                user_id
+            )
+        )
+
+    else:
+
+        cursor.execute(
+            """
+            INSERT INTO users
+            (
+                user_id,
+                username,
+                first_seen,
+                last_seen,
+                last_photo
+            )
+            VALUES (?, ?, ?, ?, NULL)
+            """,
+            (
+                user_id,
+                username,
+                now,
+                now
+            )
+        )
 
     db.commit()
 
 
-# =========================
-# START
-# =========================
+# ==========================================
+# /START
+# ==========================================
 
 @dp.message(Command("start"))
 async def start(message: Message):
@@ -84,13 +139,14 @@ async def start(message: Message):
     await message.answer(
         "👋 <b>Добро пожаловать на фото-батл!</b>\n\n"
         "📷 Отправь фотографию для участия.\n\n"
-        "⏳ Фотографию можно отправлять раз в 14 часов."
+        "⏳ Фотографию можно отправлять "
+        "раз в 14 часов."
     )
 
 
-# =========================
+# ==========================================
 # ФОТО
-# =========================
+# ==========================================
 
 @dp.message(F.photo)
 async def receive_photo(message: Message):
@@ -99,18 +155,26 @@ async def receive_photo(message: Message):
 
     user_id = message.from_user.id
     now = datetime.now()
+    timestamp = int(now.timestamp())
 
+    # Получаем последнее фото
     cursor.execute(
-        "SELECT last_photo FROM users WHERE user_id = ?",
+        """
+        SELECT last_photo
+        FROM users
+        WHERE user_id = ?
+        """,
         (user_id,)
     )
 
     result = cursor.fetchone()
 
-    # Проверяем cooldown
+    # Проверяем 14 часов
     if result and result[0] is not None:
 
-        last_photo = datetime.fromtimestamp(result[0])
+        last_photo = datetime.fromtimestamp(
+            result[0]
+        )
 
         passed = now - last_photo
 
@@ -127,14 +191,13 @@ async def receive_photo(message: Message):
 
             await message.answer(
                 "⏳ <b>Фотография уже отправлена!</b>\n\n"
-                f"Следующую фотографию можно будет "
-                f"отправить через <b>{hours} ч. "
-                f"{minutes} мин.</b>"
+                f"Следующую фотографию можно отправить "
+                f"через <b>{hours} ч. {minutes} мин.</b>"
             )
 
             return
 
-    # Записываем время
+    # Сохраняем время последнего фото
     cursor.execute(
         """
         UPDATE users
@@ -142,17 +205,36 @@ async def receive_photo(message: Message):
         WHERE user_id = ?
         """,
         (
-            int(now.timestamp()),
+            timestamp,
             user_id
+        )
+    )
+
+    # Сохраняем фотографию в статистику
+    cursor.execute(
+        """
+        INSERT INTO photos
+        (
+            user_id,
+            created_at
+        )
+        VALUES (?, ?)
+        """,
+        (
+            user_id,
+            timestamp
         )
     )
 
     db.commit()
 
+    # Получаем фото
     photo = message.photo[-1].file_id
 
     if message.from_user.username:
-        username = f"@{message.from_user.username}"
+        username = (
+            f"@{message.from_user.username}"
+        )
     else:
         username = "Нет username"
 
@@ -167,6 +249,7 @@ async def receive_photo(message: Message):
         f"🕒 {time_string}"
     )
 
+    # Отправляем админу
     await bot.send_photo(
         chat_id=ADMIN_ID,
         photo=photo,
@@ -180,9 +263,9 @@ async def receive_photo(message: Message):
     )
 
 
-# ==================================================
-#                    АДМИНКА
-# ==================================================
+# ==========================================
+# АДМИН-ПАНЕЛЬ
+# ==========================================
 
 @dp.message(Command("admin"))
 async def admin(message: Message):
@@ -194,14 +277,14 @@ async def admin(message: Message):
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="📢 Рассылка",
-                    callback_data="admin_broadcast"
+                    text="📊 Статистика",
+                    callback_data="admin_stats"
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="👥 Участники",
-                    callback_data="admin_users"
+                    text="📢 Рассылка",
+                    callback_data="admin_broadcast"
                 )
             ]
         ]
@@ -214,83 +297,267 @@ async def admin(message: Message):
     )
 
 
-# ==================================================
-#               НАЖАТИЕ "РАССЫЛКА"
-# ==================================================
+# ==========================================
+# СТАТИСТИКА
+# ==========================================
 
-@dp.callback_query(F.data == "admin_broadcast")
-async def admin_broadcast(callback: CallbackQuery):
+@dp.callback_query(F.data == "admin_stats")
+async def admin_stats(
+    callback: CallbackQuery
+):
 
     if callback.from_user.id != ADMIN_ID:
         return
 
-    await callback.message.answer(
-        "📢 <b>Создание рассылки</b>\n\n"
-        "Отправь одним сообщением текст и ссылку.\n\n"
-        "Пример:\n\n"
-        "<code>"
-        "Завтра батл! 🔥\n"
-        "Жду ваши фотографии!\n\n"
-        "https://t.me/photobatteel"
-        "</code>\n\n"
-        "После этого бот автоматически "
-        "разошлёт сообщение всем участникам."
+    now = datetime.now()
+
+    current_timestamp = int(
+        now.timestamp()
     )
 
-    # Сохраняем режим рассылки
-    broadcast_mode[ADMIN_ID] = True
+    day_start = datetime(
+        now.year,
+        now.month,
+        now.day
+    )
+
+    day_timestamp = int(
+        day_start.timestamp()
+    )
+
+    yesterday_timestamp = int(
+        (now - timedelta(hours=24)).timestamp()
+    )
+
+    # ======================================
+    # ВСЕ ПОЛЬЗОВАТЕЛИ
+    # ======================================
+
+    cursor.execute(
+        "SELECT COUNT(*) FROM users"
+    )
+
+    total_users = cursor.fetchone()[0]
+
+    # ======================================
+    # АКТИВНЫЕ ЗА 24 ЧАСА
+    # ======================================
+
+    cursor.execute(
+        """
+        SELECT COUNT(*)
+        FROM users
+        WHERE last_seen >= ?
+        """,
+        (yesterday_timestamp,)
+    )
+
+    active_users = cursor.fetchone()[0]
+
+    # ======================================
+    # НОВЫЕ СЕГОДНЯ
+    # ======================================
+
+    cursor.execute(
+        """
+        SELECT COUNT(*)
+        FROM users
+        WHERE first_seen >= ?
+        """,
+        (day_timestamp,)
+    )
+
+    new_users = cursor.fetchone()[0]
+
+    # ======================================
+    # ВСЕ ФОТО
+    # ======================================
+
+    cursor.execute(
+        "SELECT COUNT(*) FROM photos"
+    )
+
+    total_photos = cursor.fetchone()[0]
+
+    # ======================================
+    # ФОТО СЕГОДНЯ
+    # ======================================
+
+    cursor.execute(
+        """
+        SELECT COUNT(*)
+        FROM photos
+        WHERE created_at >= ?
+        """,
+        (day_timestamp,)
+    )
+
+    today_photos = cursor.fetchone()[0]
+
+    # ======================================
+    # СТАТИСТИКА
+    # ======================================
+
+    text = (
+        "📊 <b>СТАТИСТИКА БОТА</b>\n\n"
+
+        f"👥 Всего пользователей: "
+        f"<b>{total_users}</b>\n"
+
+        f"🟢 Активных за 24 часа: "
+        f"<b>{active_users}</b>\n"
+
+        f"🆕 Новых сегодня: "
+        f"<b>{new_users}</b>\n\n"
+
+        f"📸 Всего фотографий: "
+        f"<b>{total_photos}</b>\n"
+
+        f"📸 Фотографий сегодня: "
+        f"<b>{today_photos}</b>"
+    )
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔄 Обновить",
+                    callback_data="admin_stats"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔙 Назад",
+                    callback_data="admin_back"
+                )
+            ]
+        ]
+    )
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=keyboard
+    )
 
     await callback.answer()
 
 
-# ==================================================
-#                  РАССЫЛКА
-# ==================================================
+# ==========================================
+# НАЗАД
+# ==========================================
 
-broadcast_mode = {}
+@dp.callback_query(F.data == "admin_back")
+async def admin_back(
+    callback: CallbackQuery
+):
 
+    if callback.from_user.id != ADMIN_ID:
+        return
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📊 Статистика",
+                    callback_data="admin_stats"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📢 Рассылка",
+                    callback_data="admin_broadcast"
+                )
+            ]
+        ]
+    )
+
+    await callback.message.edit_text(
+        "🛠 <b>АДМИН-ПАНЕЛЬ</b>\n\n"
+        "Выбери действие:",
+        reply_markup=keyboard
+    )
+
+    await callback.answer()
+
+
+# ==========================================
+# РЕЖИМ РАССЫЛКИ
+# ==========================================
+
+broadcast_mode = False
+
+
+@dp.callback_query(F.data == "admin_broadcast")
+async def admin_broadcast(
+    callback: CallbackQuery
+):
+
+    global broadcast_mode
+
+    if callback.from_user.id != ADMIN_ID:
+        return
+
+    broadcast_mode = True
+
+    await callback.message.answer(
+        "📢 <b>РАССЫЛКА</b>\n\n"
+        "Отправь одним сообщением текст "
+        "и ссылку.\n\n"
+
+        "Пример:\n\n"
+
+        "Завтра батл! 🔥\n"
+        "Жду ваши фотографии!\n\n"
+
+        "https://t.me/photobatteel"
+    )
+
+    await callback.answer()
+
+
+# ==========================================
+# РАССЫЛКА
+# ==========================================
 
 @dp.message(F.text)
 async def text_handler(message: Message):
 
-    user_id = message.from_user.id
+    global broadcast_mode
 
-    # =========================
-    # АДМИНСКАЯ РАССЫЛКА
-    # =========================
+    # ======================================
+    # РАССЫЛКА АДМИНА
+    # ======================================
 
     if (
-        user_id == ADMIN_ID
-        and broadcast_mode.get(ADMIN_ID) is True
+        message.from_user.id == ADMIN_ID
+        and broadcast_mode
     ):
 
         text = message.text.strip()
 
-        # Ищем Telegram ссылку
         link = None
 
+        # Ищем ссылку
         for word in text.split():
 
             if (
                 word.startswith("https://t.me/")
                 or word.startswith("http://t.me/")
             ):
+
                 link = word
                 break
 
         if not link:
 
             await message.answer(
-                "❌ <b>Ссылка не найдена.</b>\n\n"
-                "Отправь сообщение вместе со ссылкой:\n\n"
-                "Завтра батл! 🔥\n"
-                "Жду ваши фотографии!\n\n"
-                "https://t.me/photobatteel"
+                "❌ Ссылка не найдена.\n\n"
+                "Отправь текст и ссылку одним сообщением."
             )
 
             return
 
-        # Убираем ссылку из текста
+        # Убираем ссылку
         broadcast_text = text.replace(
             link,
             ""
@@ -307,7 +574,6 @@ async def text_handler(message: Message):
             ]
         )
 
-        # Получаем пользователей
         cursor.execute(
             "SELECT user_id FROM users"
         )
@@ -324,12 +590,12 @@ async def text_handler(message: Message):
 
         for row in users:
 
-            target_id = row[0]
+            user_id = row[0]
 
             try:
 
                 await bot.send_message(
-                    chat_id=target_id,
+                    chat_id=user_id,
                     text=broadcast_text,
                     reply_markup=keyboard
                 )
@@ -341,12 +607,12 @@ async def text_handler(message: Message):
             except Exception as error:
 
                 print(
-                    f"Ошибка отправки {target_id}: {error}"
+                    f"Ошибка {user_id}: {error}"
                 )
 
                 failed += 1
 
-        broadcast_mode[ADMIN_ID] = False
+        broadcast_mode = False
 
         await message.answer(
             "✅ <b>РАССЫЛКА ЗАВЕРШЕНА</b>\n\n"
@@ -356,9 +622,9 @@ async def text_handler(message: Message):
 
         return
 
-    # =========================
+    # ======================================
     # ОБЫЧНЫЙ ТЕКСТ
-    # =========================
+    # ======================================
 
     save_user(message)
 
@@ -368,37 +634,13 @@ async def text_handler(message: Message):
     )
 
 
-# ==================================================
-#              КОЛИЧЕСТВО УЧАСТНИКОВ
-# ==================================================
-
-@dp.callback_query(F.data == "admin_users")
-async def admin_users(callback: CallbackQuery):
-
-    if callback.from_user.id != ADMIN_ID:
-        return
-
-    cursor.execute(
-        "SELECT COUNT(*) FROM users"
-    )
-
-    count = cursor.fetchone()[0]
-
-    await callback.message.answer(
-        f"👥 Сейчас зарегистрировано: "
-        f"<b>{count}</b> участников."
-    )
-
-    await callback.answer()
-
-
-# ==================================================
-#                    ЗАПУСК
-# ==================================================
+# ==========================================
+# ЗАПУСК
+# ==========================================
 
 async def main():
 
-    print("BOT STARTED")
+    print("🤖 BOT STARTED")
 
     await dp.start_polling(bot)
 
