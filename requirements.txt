@@ -1,0 +1,4 @@
+python-telegram-bot==22.5
+python-dotenv==1.1.1
+Pillow==11.3.0
+ImageHash==4.3.2
